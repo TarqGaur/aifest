@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Gesture Reveal</title>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        canvas { display: block; }
+        #video-container { position: fixed; bottom: 10px; right: 10px; width: 150px; transform: scaleX(-1); border-radius: 10px; overflow: hidden; border: 2px solid #333; }
+        #instructions { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: white; text-align: center; font-family: sans-serif; pointer-events: none; z-index: 10; transition: opacity 0.5s; }
+        #progress-bar { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); width: 300px; height: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; overflow: hidden; }
+        #progress-fill { height: 100%; background: linear-gradient(90deg, #00f5ff, #ff00ff); width: 0%; transition: width 0.3s; }
+    </style>
+</head>
+<body>
+
+    <div id="instructions">
+        <h1 class="text-4xl font-bold mb-4">ENTER THE FUTURE</h1>
+        <!-- <p class="text-gray-400">Wave your hand to erase the darkness</p> -->
+    </div>
+
+    <div id="progress-bar">
+        <div id="progress-fill"></div>
+    </div>
+
+    <div id="video-container" style="visibility: hidden;">
+        <video id="input_video" class="w-full"></video>
+    </div>
+
+    <script>
+        let bgImage;
+        let bgVideo;
+        let maskGraphics;
+        let particles = [];
+        let handX = 0;
+        let handY = 0;
+        let isTracking = false;
+        let audio;
+        let prevHandX = 0;
+        let prevHandY = 0;
+        
+        // Auto-reveal variables
+        let revealPercentage = 0;
+        let autoRevealing = false;
+        let revealAlpha = 255;
+        let hasTriggeredAutoReveal = false;
+        let useVideo = false; // NEW: Track whether to use video or image
+        
+        // Video/Image aspect ratio variables
+        let videoX = 0;
+        let videoY = 0;
+        let videoW = 0;
+        let videoH = 0;
+
+        function preload() {
+            // Load background image FIRST (before 30% reveal)
+            bgImage = loadImage('bgd.jpeg');
+            
+            // Load background video (for after auto-reveal)
+            bgVideo = createVideo('Video_Generation_From_Image.mp4');
+            bgVideo.hide();
+            bgVideo.volume(0);
+            bgVideo.pause();
+        }
+
+        function setup() {
+            createCanvas(windowWidth, windowHeight);
+            
+            // Calculate dimensions maintaining aspect ratio
+            calculateVideoDimensions();
+            
+            // Create a black "veil" layer
+            maskGraphics = createGraphics(windowWidth, windowHeight);
+            maskGraphics.background(0);
+            maskGraphics.erase();
+            
+            // Setup Audio
+            audio = new Audio('https://www.soundhelix.com/examples/mp3/SoundHelix-Song-10.mp3');
+            audio.loop = true;
+        }
+
+        function calculateVideoDimensions() {
+            let canvasRatio = width / height;
+            
+            // Use image dimensions first (since it loads first)
+            if (bgImage.width > 0) {
+                let imageRatio = bgImage.width / bgImage.height;
+                if (canvasRatio > imageRatio) {
+                    videoW = width;
+                    videoH = width / imageRatio;
+                    videoX = 0;
+                    videoY = (height - videoH) / 2;
+                } else {
+                    videoH = height;
+                    videoW = height * imageRatio;
+                    videoX = (width - videoW) / 2;
+                    videoY = 0;
+                }
+            }
+        }
+
+        function draw() {
+            // 1. Draw black background
+            background(0);
+            
+            // 2. Draw background content (image BEFORE auto-reveal, video AFTER)
+            if (!useVideo && bgImage.width > 0) {
+                // Draw static image before auto-reveal
+                image(bgImage, videoX, videoY, videoW, videoH);
+            } else if (useVideo && bgVideo.width > 0) {
+                // Draw video after auto-reveal
+                image(bgVideo, videoX, videoY, videoW, videoH);
+            }
+
+            // 3. Handle the "Erase" logic based on hand movement
+            if (isTracking && !autoRevealing) {
+                // Draw larger circles for faster reveal
+                maskGraphics.ellipse(handX, handY, 200, 200);
+                
+                // Draw intermediate circles along the path
+                let dist = Math.sqrt((handX - prevHandX) ** 2 + (handY - prevHandY) ** 2);
+                if (dist > 5) {
+                    let steps = Math.ceil(dist / 20);
+                    for (let i = 0; i < steps; i++) {
+                        let t = i / steps;
+                        let ix = lerp(prevHandX, handX, t);
+                        let iy = lerp(prevHandY, handY, t);
+                        maskGraphics.ellipse(ix, iy, 200, 200);
+                    }
+                }
+                
+                prevHandX = handX;
+                prevHandY = handY;
+                createParticles(handX, handY);
+                
+                // Calculate reveal percentage every 60 frames
+                if (frameCount % 60 === 0) {
+                    calculateRevealPercentage();
+                }
+            }
+
+            // 4. Auto-reveal animation
+            if (autoRevealing) {
+                revealAlpha -= 8;
+                maskGraphics.push();
+                maskGraphics.noErase();
+                maskGraphics.fill(0, revealAlpha);
+                maskGraphics.rect(0, 0, width, height);
+                maskGraphics.pop();
+                
+                // Create burst of particles during reveal
+                if (frameCount % 3 === 0) {
+                    for (let i = 0; i < 10; i++) {
+                        createParticles(random(width), random(height));
+                    }
+                }
+                
+                if (revealAlpha <= 0) {
+                    autoRevealing = false;
+                    maskGraphics.clear();
+                    maskGraphics.background(0, 0);
+                }
+            }
+
+            // 5. Draw the Black Mask on top
+            noErase();
+            image(maskGraphics, 0, 0);
+
+            // 6. Draw Glitter Stars
+            updateParticles();
+        }
+
+        function calculateRevealPercentage() {
+            maskGraphics.loadPixels();
+            let totalPixels = maskGraphics.pixels.length / 4;
+            let revealedPixels = 0;
+            
+            // Sample every 10th pixel for performance
+            for (let i = 0; i < maskGraphics.pixels.length; i += 40) {
+                if (maskGraphics.pixels[i + 3] === 0) {
+                    revealedPixels++;
+                }
+            }
+            
+            revealPercentage = (revealedPixels / (totalPixels / 10)) * 100;
+            
+            // Update progress bar
+            document.getElementById('progress-fill').style.width = revealPercentage + '%';
+            
+            // Trigger auto-reveal at 30%
+            if (revealPercentage >= 30 && !hasTriggeredAutoReveal) {
+                triggerAutoReveal();
+            }
+        }
+
+        function triggerAutoReveal() {
+            hasTriggeredAutoReveal = true;
+            autoRevealing = true;
+            isTracking = false;
+            useVideo = true; // NEW: Switch to video after trigger
+            
+            // Hide progress bar
+            document.getElementById('progress-bar').style.opacity = '0';
+            
+            // Play video ONLY after auto-reveal (as requested)
+            // bgVideo.loop(); // Enable looping
+            bgVideo.play();
+            
+            console.log('Auto-reveal triggered at ' + Math.round(revealPercentage) + '% - Switched to video');
+        }
+
+        function createParticles(x, y) {
+            for (let i = 0; i < 3; i++) {
+                particles.push({
+                    x: x,
+                    y: y,
+                    vx: random(-3, 3),
+                    vy: random(-3, 3),
+                    alpha: 255,
+                    size: random(3, 8),
+                    color: color(random(150, 255), random(200, 255), 255)
+                });
+            }
+        }
+
+        function updateParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                let p = particles[i];
+                noStroke();
+                fill(p.color.levels[0], p.color.levels[1], p.color.levels[2], p.alpha);
+                ellipse(p.x, p.y, p.size);
+                p.x += p.vx;
+                p.y += p.vy;
+                p.alpha -= 8;
+                if (p.alpha <= 0) particles.splice(i, 1);
+            }
+        }
+
+        // --- MediaPipe Hand Tracking Setup ---
+        const videoElement = document.getElementById('input_video');
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 0,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        hands.onResults((results) => {
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0 && !autoRevealing) {
+                isTracking = true;
+                const landmark = results.multiHandLandmarks[0][8];
+                handX = (1 - landmark.x) * width;
+                handY = landmark.y * height;
+                document.getElementById('instructions').style.opacity = 0;
+            } else if (!autoRevealing) {
+                isTracking = false;
+            }
+        });
+
+        const camera = new Camera(videoElement, {
+            onFrame: async () => { await hands.send({image: videoElement}); },
+            width: 640, height: 480
+        });
+
+        window.addEventListener('click', () => {
+            camera.start();
+            audio.play();
+        });
+
+        function windowResized() {
+            resizeCanvas(windowWidth, windowHeight);
+            calculateVideoDimensions();
+        }
+    </script>
+</body>
+</html>
